@@ -243,6 +243,108 @@ func (ts *CardinalitySuite) TestE2E() {
 	}
 }
 
+func (ts *CardinalitySuite) TestFetchTSDBStatus_Non2xxStatus() {
+	response := &http.Response{
+		Status:     "500 Internal Server Error",
+		StatusCode: 500,
+		Body:       io.NopCloser(bytes.NewBufferString("")),
+	}
+	ts.MockPrometheusClient.EXPECT().Do(gomock.Any()).Return(response, nil)
+	promInstance := PrometheusCardinalityInstance{InstanceAddress: "http://localhost:9090"}
+	err := promInstance.FetchTSDBStatus(ts.MockPrometheusClient, 20)
+	assert.NotNil(ts.T(), err)
+	assert.Contains(ts.T(), err.Error(), "500 Internal Server Error")
+}
+
+func (ts *CardinalitySuite) TestFetchTSDBStatus_ConnectionError() {
+	ts.MockPrometheusClient.EXPECT().Do(gomock.Any()).Return(nil, fmt.Errorf("connection refused"))
+	promInstance := PrometheusCardinalityInstance{InstanceAddress: "http://localhost:9090"}
+	err := promInstance.FetchTSDBStatus(ts.MockPrometheusClient, 20)
+	assert.NotNil(ts.T(), err)
+	assert.Contains(ts.T(), err.Error(), "connection refused")
+}
+
+func (ts *CardinalitySuite) TestFetchTSDBStatus_InvalidJSON() {
+	response := &http.Response{
+		Status:     "200 OK",
+		StatusCode: 200,
+		Body:       io.NopCloser(bytes.NewBufferString("invalid json")),
+	}
+	ts.MockPrometheusClient.EXPECT().Do(gomock.Any()).Return(response, nil)
+	promInstance := PrometheusCardinalityInstance{InstanceAddress: "http://localhost:9090"}
+	err := promInstance.FetchTSDBStatus(ts.MockPrometheusClient, 20)
+	assert.NotNil(ts.T(), err)
+	assert.Contains(ts.T(), err.Error(), "Can't parse json")
+}
+
+type errorReader struct{}
+
+func (e *errorReader) Read(p []byte) (n int, err error) {
+	return 0, fmt.Errorf("read error")
+}
+func (e *errorReader) Close() error { return nil }
+
+func (ts *CardinalitySuite) TestFetchTSDBStatus_ReadError() {
+	response := &http.Response{
+		Status:     "200 OK",
+		StatusCode: 200,
+		Body:       &errorReader{},
+	}
+	ts.MockPrometheusClient.EXPECT().Do(gomock.Any()).Return(response, nil)
+	promInstance := PrometheusCardinalityInstance{InstanceAddress: "http://localhost:9090"}
+	err := promInstance.FetchTSDBStatus(ts.MockPrometheusClient, 20)
+	assert.NotNil(ts.T(), err)
+	assert.Contains(ts.T(), err.Error(), "Can't read from socket")
+}
+
+func (ts *CardinalitySuite) TestUpdateMetric_Error() {
+	ts.MockSeriesCountByMetricNameGauge.EXPECT().GetMetricWith(gomock.Any()).Return(nil, fmt.Errorf("prometheus error"))
+	metric := &PrometheusCardinalityMetric{GaugeVec: ts.MockSeriesCountByMetricNameGauge}
+	newLabelsValues := []labelValuePair{{Label: "test", Value: 10}}
+	_, err := metric.updateMetric(newLabelsValues, []string{}, "inst", "shard", "ns", "metric")
+	assert.NotNil(ts.T(), err)
+	assert.Contains(ts.T(), err.Error(), "prometheus error")
+}
+
+func (ts *CardinalitySuite) TestUpdateMetric_EmptyLabel() {
+	// If a label is empty, it should stop processing further labels
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{})
+	ts.MockSeriesCountByMetricNameGauge.EXPECT().GetMetricWith(gomock.Any()).Return(gauge, nil).Times(1)
+	// It should also call Delete for old tracked labels that are not in the first part
+	ts.MockSeriesCountByMetricNameGauge.EXPECT().Delete(gomock.Any()).Return(true).Times(1)
+
+	metric := &PrometheusCardinalityMetric{GaugeVec: ts.MockSeriesCountByMetricNameGauge}
+	newLabelsValues := []labelValuePair{
+		{Label: "valid", Value: 10},
+		{Label: "", Value: 20},
+		{Label: "ignored", Value: 30},
+	}
+	tracked, err := metric.updateMetric(newLabelsValues, []string{"old"}, "inst", "shard", "ns", "metric")
+	assert.Nil(ts.T(), err)
+	assert.Equal(ts.T(), []string{"valid", "", ""}, tracked)
+}
+
+func (ts *CardinalitySuite) TestExposeTSDBStatus_Error() {
+	ts.MockSeriesCountByMetricNameGauge.EXPECT().GetMetricWith(gomock.Any()).Return(nil, fmt.Errorf("update error"))
+
+	promInstance := PrometheusCardinalityInstance{
+		LatestTSDBStatus: TSDBStatus{
+			Data: TSDBData{
+				SeriesCountByMetricName: []labelValuePair{{Label: "test", Value: 1}},
+			},
+		},
+	}
+
+	err := promInstance.ExposeTSDBStatus(
+		&PrometheusCardinalityMetric{GaugeVec: ts.MockSeriesCountByMetricNameGauge},
+		&PrometheusCardinalityMetric{GaugeVec: ts.MockLabelValueCountByLabelNameGauge},
+		&PrometheusCardinalityMetric{GaugeVec: ts.MockMemoryInBytesByLabelNameGauge},
+		&PrometheusCardinalityMetric{GaugeVec: ts.MockSeriesCountByLabelValuePairGauge},
+	)
+	assert.NotNil(ts.T(), err)
+	assert.Contains(ts.T(), err.Error(), "update error")
+}
+
 // Test cases
 var cardinalityTests = []struct {
 	json                    string

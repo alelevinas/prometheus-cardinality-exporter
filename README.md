@@ -208,6 +208,9 @@ docker build -f Dockerfile-builder . -t prometheus-cardinality-exporter
 ```
 
 ## 🧪 Testing 
+
+The project includes comprehensive unit tests and end-to-end (E2E) tests covering core logic and error scenarios.
+
 ```bash
 go test ./...
 ```
